@@ -115,21 +115,27 @@ let get_rrd_updates_handler (req : Http.Request.t) (s : Unix.file_descr) _ =
  * field in the memory. If archiving, it is guaranteed by rrdd_proxy to be
  * called on the master, and that the uuid represents a VM, not a host. *)
 let put_rrd_handler (req : Http.Request.t) (s : Unix.file_descr) _ =
-	let query = req.Http.Request.query in
-	let uuid = List.assoc "uuid" query in
-	let is_host = bool_of_string (List.assoc "is_host" query) in
-	(* Tell the client that we are ready to receive the data. *)
-	Http_svr.headers s (Http.http_200_ok ());
-	let rrd = rrd_of_fd s in
-	(* By now, we know that the data represents a valid RRD. *)
-	if List.mem_assoc "archive" query then (
-		debug "Receiving RRD on the master for archiving, type=%s."
-			(if is_host then "Host" else "VM uuid=" ^ uuid);
-		archive_rrd_internal ~uuid ~rrd:(Rrd.copy_rrd rrd) ()
-	) else (
-		debug "Receiving RRD for resident VM uuid=%s. Replacing in hashtable." uuid;
-		let domid = int_of_string (List.assoc "domid" query) in
-		Mutex.execute mutex (fun _ ->
-			Hashtbl.replace vm_rrds uuid {rrd; dss = []; domid}
+	match req.Http.Request.content_length with
+	| Some content_length -> begin
+		let query = req.Http.Request.query in
+		let uuid = List.assoc "uuid" query in
+		let is_host = bool_of_string (List.assoc "is_host" query) in
+		(* Tell the client that we are ready to receive the data. *)
+		Http_svr.headers s (Http.http_200_ok ());
+		let data_length = Int64.to_int content_length in
+		let data = Unixext.really_read_string s data_length in
+		let rrd = Rrd.from_xml (`String (data, data_length) |> Xmlm.make_input) in
+		(* By now, we know that the data represents a valid RRD. *)
+		if List.mem_assoc "archive" query then (
+			debug "Receiving RRD on the master for archiving, type=%s."
+				(if is_host then "Host" else "VM uuid=" ^ uuid);
+			archive_rrd_internal ~uuid ~rrd:(Rrd.copy_rrd rrd) ()
+		) else (
+			debug "Receiving RRD for resident VM uuid=%s. Replacing in hashtable." uuid;
+			let domid = int_of_string (List.assoc "domid" query) in
+			Mutex.execute mutex (fun _ ->
+				Hashtbl.replace vm_rrds uuid {rrd; dss = []; domid}
+			)
 		)
-	)
+	end
+	| None -> Http_svr.headers s (Http.http_411_length_required ())
