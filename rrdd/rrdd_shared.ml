@@ -101,6 +101,9 @@ let send_rrd ?(session_id : string option) ~(address : string)
 		~(to_archive : bool) ~(uuid : string) ~(rrd : Rrd.rrd) () =
 	debug "Sending RRD for object uuid=%s archiving=%b to address: %s"
 		uuid to_archive address;
+	let buffer = Buffer.create 100 in
+	Rrd.xml_to_output rrd (`Buffer buffer |> Xmlm.make_output);
+	let content_length = Buffer.length buffer |> Int64.of_int in
 	let arch_query = if to_archive then ["archive", "true"] else [] in
 	let sid_query = match session_id with
 		None -> [] | Some id -> ["session_id", id] in
@@ -109,12 +112,12 @@ let send_rrd ?(session_id : string option) ~(address : string)
 		if sid_query = [] then ["pool_secret", get_pool_secret ()] else [] in
 	let request =
 		Http.Request.make ~user_agent:Constants.rrdd_user_agent
-			~query ~cookie Http.Put Constants.put_rrd_uri in
+			~query ~cookie ~length:content_length Http.Put Constants.put_rrd_uri in
 	let open Xmlrpc_client in
 	let transport = SSL(SSL.make (), address, !https_port) in
 	with_transport transport (
 		with_http request (fun (response, fd) ->
-			try Rrd_unix.to_fd rrd fd
+			try Unixext.really_write_string fd (Buffer.contents buffer);
 			with e -> log_backtrace ()
 		)
 	);
